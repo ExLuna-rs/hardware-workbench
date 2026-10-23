@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Atelier — Assemblage</title>
+<style>
+  :root {
+    --bg: #12151a; --panel: #1b2027; --line: #2b323c; --text: #e6e9ee; --muted: #8a94a3;
+    --ok: #3fb68b; --warn: #e0a43a; --bad: #e5534b; --accent: #5aa9e6;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #app { display: grid; grid-template-columns: 300px 1fr; height: 100%; }
+  aside { background: var(--panel); border-right: 1px solid var(--line); padding: 14px; overflow-y: auto; }
+  h1 { font-size: 14px; margin: 0 0 12px; letter-spacing: .02em; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 18px 0 8px; }
+  select, button { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 7px 8px; font: inherit; }
+  button { cursor: pointer; margin-top: 6px; }
+  button:hover { border-color: var(--accent); }
+  label.row { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; }
+  .swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+  input[type=range] { width: 100%; }
+  .status { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 999px;
+    font-weight: 600; font-size: 12px; background: var(--bg); border: 1px solid var(--line); }
+  .status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .status.ok::before { background: var(--ok); } .status.bad::before { background: var(--bad); }
+  .finding { border-left: 3px solid var(--warn); padding: 4px 8px; margin: 6px 0; background: var(--bg); border-radius: 0 4px 4px 0; }
+  .finding.collision { border-color: var(--bad); }
+  .muted { color: var(--muted); }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0; }
+  dt { color: var(--muted); } dd { margin: 0; font-variant-numeric: tabular-nums; }
+  main { position: relative; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #toast { position: absolute; top: 12px; right: 12px; background: var(--panel); border: 1px solid var(--line);
+    padding: 6px 10px; border-radius: 6px; opacity: 0; transition: opacity .3s; pointer-events: none; }
+  #toast.show { opacity: 1; }
+  a { color: var(--accent); }
+  @media (max-width: 700px) {
+    #app { grid-template-columns: 1fr; grid-template-rows: auto 60vh; }
+    aside { border-right: 0; border-bottom: 1px solid var(--line); max-height: 40vh; }
+  }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="app">
+  <aside>
+    <h1>Atelier — Assemblage</h1>
+    <select id="project"></select>
+    <div style="margin-top:10px"><span id="status" class="status">en attente</span></div>
+
+    <h2>Calques</h2>
+    <div id="layers"></div>
+    <label class="muted">Opacité du boîtier</label>
+    <input id="opacity" type="range" min="0.1" max="1" step="0.05" value="0.45">
+    <button id="explode">Éclater le couvercle</button>
+    <button id="fit">Recadrer</button>
+
+    <h2>Dimensions</h2>
+    <dl id="dims"><dt class="muted">—</dt><dd></dd></dl>
+
+    <h2>Vérification</h2>
+    <div id="findings" class="muted">Aucun rapport.</div>
+
+    <h2>Fichiers</h2>
+    <div id="files" class="muted">—</div>
+  </aside>
+  <main><canvas id="c"></canvas><div id="toast">Mis à jour</div></main>
+</div>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+
+const params = new URLSearchParams(location.search);
+const token = params.get("token");
+const withToken = (u) => token ? `${u}${u.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : u;
+const $ = (id) => document.getElementById(id);
+
+const LAYERS = {
+  carte:      { file: "carte.glb",      color: 0x2e8b57, label: "Carte",      opaque: true },
+  fond:       { file: "fond.glb",       color: 0xb8c2cc, label: "Fond",       opaque: false },
+  couvercle:  { file: "couvercle.glb",  color: 0x8fa3b8, label: "Couvercle",  opaque: false },
+  collisions: { file: "collisions.glb", color: 0xff2d2d, label: "Collisions", opaque: true },
+};
+
+// --- Scène ---
+const canvas = $("c");
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x12151a);
+const camera = new THREE.PerspectiveCamera(40, 1, 0.0001, 10);
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+scene.add(new THREE.HemisphereLight(0xffffff, 0x334455, 1.6));
+const sun = new THREE.DirectionalLight(0xffffff, 1.4);
+sun.position.set(1, 2, 1.5);
+scene.add(sun);
+const grid = new THREE.GridHelper(0.3, 30, 0x2b323c, 0x1f252d);  // 30 cm, carreaux de 1 cm (unités : mètres)
+scene.add(grid);
+
+const groups = {};
+const visible = { carte: true, fond: true, couvercle: true, collisions: true };
+let exploded = false, project = null, lastUpdated = 0, firstLoad = true;
+const loader = new GLTFLoader();
+
+function material(layer) {
+  const def = LAYERS[layer];
+  return new THREE.MeshStandardMaterial({
+    color: def.color, metalness: 0.05, roughness: 0.75,
+    transparent: !def.opaque, opacity: def.opaque ? 1 : +$("opacity").value,
+    depthWrite: def.opaque, side: THREE.DoubleSide,
+    ...(layer === "collisions" ? { emissive: 0x550000 } : {}),
+  });
+}
+
+async function loadLayer(layer, version) {
+  if (groups[layer]) { scene.remove(groups[layer]); groups[layer] = null; }
+  const url = withToken(`/files/${encodeURIComponent(project)}/${LAYERS[layer].file}?v=${version}`);
+  try {
+    const gltf = await loader.loadAsync(url);
+    const mat = material(layer);
+    gltf.scene.traverse((o) => { if (o.isMesh) o.material = mat; });
+    groups[layer] = gltf.scene;
+    gltf.scene.visible = visible[layer];
+    scene.add(gltf.scene);
+  } catch { /* calque absent (ex. aucune collision) */ }
+}
+
+function applyExplode() {
+  const lid = groups.couvercle; if (!lid) return;
+  // glTF : Y vers le haut. On soulève le couvercle d'environ la moitié de la hauteur du fond.
+  const h = groups.fond ? new THREE.Box3().setFromObject(groups.fond).getSize(new THREE.Vector3()).y : 0.02;
+  lid.position.y = exploded ? h * 0.6 : 0;
+}
+
+function fit() {
+  const box = new THREE.Box3();
+  Object.values(groups).forEach((g) => g && box.expandByObject(g));
+  if (box.isEmpty()) return;
+  const size = box.getSize(new THREE.Vector3()).length();
+  const center = box.getCenter(new THREE.Vector3());
+  controls.target.copy(center);
+  camera.position.copy(center).add(new THREE.Vector3(0.9, 0.8, 1.1).multiplyScalar(size));
+  camera.near = size / 200; camera.far = size * 50; camera.updateProjectionMatrix();
+  grid.position.y = box.min.y;
+}
+
+// --- Panneau ---
+function renderLayers(present) {
+  $("layers").innerHTML = "";
+  for (const [key, def] of Object.entries(LAYERS)) {
+    if (!present.includes(def.file)) continue;
+    const row = document.createElement("label");
+    row.className = "row";
+    row.innerHTML = `<input type="checkbox" ${visible[key] ? "checked" : ""}>
+      <span class="swatch" style="background:#${def.color.toString(16).padStart(6, "0")}"></span>${def.label}`;
+    row.querySelector("input").onchange = (e) => {
+      visible[key] = e.target.checked; if (groups[key]) groups[key].visible = visible[key];
+    };
+    $("layers").appendChild(row);
+  }
+}
+
+function renderReport(rep) {
+  if (!rep) return;
+  const d = rep.dims, it = rep.interference;
+  const fmt = (a) => a.map((v) => v.toFixed(1)).join(" × ");
+  $("dims").innerHTML = `
+    <dt>Extérieur</dt><dd>${fmt(d.outer_mm)} mm</dd>
+    <dt>Intérieur</dt><dd>${fmt(d.inner_mm)} mm</dd>
+    <dt>Carte</dt><dd>${fmt(d.board_mm)} mm</dd>
+    <dt>Plots</dt><dd>${d.posts.length} × ${d.standoff_height_mm} mm${d.posts_are_screw_holes ? " (vissés)" : " (appui)"}</dd>`;
+  const st = $("status");
+  st.className = "status " + (it.ok ? "ok" : "bad");
+  st.textContent = it.ok ? (it.tight ? `OK, ${it.tight} jeu(x) serré(s)` : "Assemblage OK") : `${it.collisions} collision(s)`;
+  $("findings").innerHTML = it.findings.length ? it.findings.map((f) => f.kind === "collision"
+      ? `<div class="finding collision"><b>${f.b}</b> touche ${f.a}<br><span class="muted">${f.volume_mm3} mm³ en (${f.at_mm.join(", ")})</span></div>`
+      : `<div class="finding"><b>${f.b}</b> à ${f.distance_mm} mm de ${f.a}<br><span class="muted">jeu mini ${it.min_gap_mm} mm</span></div>`
+    ).join("") : `<span class="muted">Rien à signaler (jeu mini ${it.min_gap_mm} mm).</span>`;
+}
+
+function renderFiles(files) {
+  const dl = files.filter((f) => /\.(stl|3mf|step)$/.test(f));
+  $("files").innerHTML = dl.length ? dl.map((f) =>
+    `<div><a href="${withToken(`/files/${encodeURIComponent(project)}/${f}`)}" download>${f}</a></div>`).join("") : "—";
+}
+
+async function refresh(force = false) {
+  if (!project) return;
+  let manifest;
+  try {
+    const r = await fetch(withToken(`/files/${encodeURIComponent(project)}/manifest.json`), { cache: "no-store" });
+    if (!r.ok) { $("status").className = "status"; $("status").textContent = "aucun boîtier généré"; return; }
+    manifest = await r.json();
+  } catch { return; }
+  if (!force && manifest.updated === lastUpdated) return;
+  lastUpdated = manifest.updated;
+  await Promise.all(Object.keys(LAYERS).map((k) => loadLayer(k, manifest.updated)));
+  applyExplode();
+  renderLayers(manifest.files);
+  renderFiles(manifest.files);
+  const rep = await fetch(withToken(`/files/${encodeURIComponent(project)}/rapport.json`), { cache: "no-store" });
+  if (rep.ok) renderReport(await rep.json());
+  if (firstLoad) { fit(); firstLoad = false; }
+  else { $("toast").classList.add("show"); setTimeout(() => $("toast").classList.remove("show"), 1500); }
+}
+
+async function init() {
+  const list = await (await fetch(withToken("/api/projects"))).json();
+  const sel = $("project");
+  sel.innerHTML = list.map((p) => `<option value="${p.name}">${p.name}</option>`).join("") || "<option>aucun projet</option>";
+  project = params.get("project") || list[0]?.name || null;
+  if (project) sel.value = project;
+  sel.onchange = () => {
+    project = sel.value; lastUpdated = 0; firstLoad = true;
+    const u = new URL(location); u.searchParams.set("project", project); history.replaceState(null, "", u);
+    refresh(true);
+  };
+  await refresh(true);
+  setInterval(refresh, 2000);  // suit les modifications faites par Claude
+}
+
+$("opacity").oninput = (e) => ["fond", "couvercle"].forEach((k) => groups[k]?.traverse((o) => {
+  if (o.isMesh) o.material.opacity = +e.target.value;
+}));
+$("explode").onclick = () => { exploded = !exploded; $("explode").textContent = exploded ? "Remettre le couvercle" : "Éclater le couvercle"; applyExplode(); };
+$("fit").onclick = fit;
+
+function resize() {
+  const { clientWidth: w, clientHeight: h } = canvas.parentElement;
+  renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(canvas.parentElement);
+renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+init();
+</script>
+</body>
+</html>

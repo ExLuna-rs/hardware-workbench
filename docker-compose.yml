@@ -1,0 +1,48 @@
+name: atelier-pcb
+
+x-kicad-build: &kicad-build
+  context: .
+  dockerfile: docker/kicad/Dockerfile
+  args:
+    WITH_3D_MODELS: ${WITH_3D_MODELS:-1}
+
+services:
+  # KiCad 10 complet, affiché dans le navigateur : http://<hôte>:6080
+  kicad:
+    build:
+      <<: *kicad-build
+      target: gui
+    image: atelier-pcb/kicad:latest
+    restart: unless-stopped
+    environment:
+      VNC_PASSWORD: ${VNC_PASSWORD:?définis VNC_PASSWORD dans .env}
+      RESOLUTION: ${RESOLUTION:-1920x1080}
+      KICAD_PROJECT: ${KICAD_PROJECT:-}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:6080:6080"
+    volumes:
+      - ./projects:/projects
+      - kicad-config:/home/ubuntu/.config/kicad
+      - kicad-ipc:/tmp/kicad
+    shm_size: "512m"
+
+  # Serveur MCP + viewer 3D : http://<hôte>:8000/mcp et /viewer
+  mcp:
+    build:
+      <<: *kicad-build
+      target: mcp
+    image: atelier-pcb/mcp:latest
+    restart: unless-stopped
+    depends_on: [kicad]
+    environment:
+      MCP_TOKEN: ${MCP_TOKEN:-}
+      ATELIER_PUBLIC_URL: ${ATELIER_PUBLIC_URL:-http://localhost:8000}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:8000:8000"
+    volumes:
+      - ./projects:/projects
+      - kicad-ipc:/tmp/kicad
+
+volumes:
+  kicad-config:
+  kicad-ipc:

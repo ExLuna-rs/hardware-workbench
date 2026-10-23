@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+build/
+
+# Projets KiCad : gérés dans leurs propres repos (ou ajoute-les explicitement)
+projects/*
+!projects/.gitkeep
+*-backups/
+*.kicad_prl
+fp-info-cache
+atelier_out/
